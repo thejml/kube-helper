@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"regexp"
+	"strings"
 	"time"
 
 	progressbar "github.com/schollz/progressbar/v3"
@@ -94,6 +95,7 @@ func scanClusterNamespaces(c *kubernetes.Clientset, dynamicClient dynamic.Interf
 	progressBar.Add(1)
 
 	//fmt.Printf("Scanning Pods...")
+	//var deployments = make(map[string]deployInfo)
 	pods, _ := c.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 
 	for i := 0; i < len(pods.Items); i++ {
@@ -101,11 +103,13 @@ func scanClusterNamespaces(c *kubernetes.Clientset, dynamicClient dynamic.Interf
 		n = pods.Items[i].Namespace
 
 		var thisNS nameSpaceDetail
+
 		if _, ok := nsDetails[n]; ok {
 			thisNS = nsDetails[n]
 		}
 
 		thisNS.images = make(map[string]imageInfo)
+		thisNS.deployments = make(map[string]deployInfo)
 		thisNS.name = n
 
 		// deploy, _ := c.AppsV1().Deployments(n).List(context.TODO(), metav1.ListOptions{})
@@ -172,6 +176,26 @@ func scanClusterNamespaces(c *kubernetes.Clientset, dynamicClient dynamic.Interf
 
 		} // End Container Loop
 
+		//		ownerName, ownerKind := findOwner(c, n, strings.TrimSpace(pods.Items[i].OwnerReferences[0].Name), strings.TrimSpace(pods.Items[i].OwnerReferences[0].Kind))
+		ownerName, ownerKind := findPseudoOwner(strings.TrimSpace(pods.Items[i].OwnerReferences[0].Name), strings.TrimSpace(pods.Items[i].OwnerReferences[0].Kind))
+		//fmt.Println(" - ", pods.Items[i].Name, pods.Items[i].OwnerReferences[0].Name, ownerName, cpuRequests, thisNS.deployments[ownerName].totalCPURequest, memoryRequests)
+		if _, ok := thisNS.deployments[ownerName]; ok {
+			// increment
+			thisNS.deployments[ownerName] = deployInfo{
+				count:           thisNS.deployments[ownerName].count + 1,
+				totalCPURequest: thisNS.deployments[ownerName].totalCPURequest + cpuRequests,
+				totalRAMRequest: thisNS.deployments[ownerName].totalRAMRequest + memoryRequests,
+			}
+		} else {
+			thisNS.deployments[ownerName] = deployInfo{
+				name:            ownerName,
+				count:           1,
+				kind:            ownerKind,
+				totalCPURequest: cpuRequests,
+				totalRAMRequest: memoryRequests,
+			}
+		}
+
 		maxRestartCount := int32(0)
 		podRunningTime := int64(0)
 		for x := 0; x < len(pod.Status.ContainerStatuses); x++ {
@@ -215,10 +239,11 @@ func scanClusterNamespaces(c *kubernetes.Clientset, dynamicClient dynamic.Interf
 		thisNS.totalCPURequest += int64(cpuRequests)
 		// And tack it on the nsDetails!
 		thisNS.pods = append(thisNS.pods, podDetails)
+		//		thisNS.deployments = deployments
 		nsDetails[n] = thisNS
 	} // End Pod Loop
 	//fmt.Printf("Done.\n")
 	progressBar.Add(1)
-
+	//nsDetails[n].deployments = deployments
 	return nsDetails
 }

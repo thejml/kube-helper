@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"time"
 
@@ -49,7 +50,28 @@ func scanNamespace(c *kubernetes.Clientset, dynamicClient dynamic.Interface, n s
 		var podDetails podInfo
 		memoryRequests := int64(0)
 		cpuRequests := int64(0)
+		fmt.Println(pods.Items[i].OwnerReferences[0].Name)
+		//		ownerName, ownerKind := findOwner(c, n, pods.Items[i].OwnerReferences[0].Name, pods.Items[i].OwnerReferences[0].Kind)
+		ownerName, ownerKind := findPseudoOwner(pods.Items[i].OwnerReferences[0].Name, pods.Items[i].OwnerReferences[0].Kind)
 
+		if _, ok := nsDetails.deployments[ownerName]; ok {
+			// increment
+			fmt.Printf("Adding %s\n", ownerName)
+			nsDetails.deployments[ownerName] = deployInfo{
+				count:           nsDetails.deployments[ownerName].count + 1,
+				totalCPURequest: nsDetails.deployments[ownerName].totalCPURequest + cpuRequests,
+				totalRAMRequest: nsDetails.deployments[ownerName].totalRAMRequest + memoryRequests,
+			}
+		} else {
+			fmt.Printf("Incing %s\n", ownerName)
+
+			nsDetails.deployments[ownerName] = deployInfo{
+				name:            ownerName,
+				count:           1,
+				totalCPURequest: cpuRequests,
+				totalRAMRequest: memoryRequests,
+			}
+		}
 		switch pods.Items[i].Status.Phase {
 		case "Running":
 			nsDetails.statusSummary.running++
@@ -142,6 +164,8 @@ func scanNamespace(c *kubernetes.Clientset, dynamicClient dynamic.Interface, n s
 			Phase:          pods.Items[i].Status.Phase,
 			RestartCount:   maxRestartCount,
 			podRunningTime: podRunningTime,
+			ownerName:      ownerName,
+			ownerKind:      ownerKind,
 		}
 		nsDetails.virtualServices = virtualServices.Items
 		nsDetails.totalRAMRequest += int64(memoryRequests)
@@ -151,4 +175,47 @@ func scanNamespace(c *kubernetes.Clientset, dynamicClient dynamic.Interface, n s
 	} // End Pod Loop
 
 	return nsDetails
+}
+
+func findPseudoOwner(oName string, oKind string) (string, string) {
+	switch oKind {
+	case "ReplicaSet":
+		//		var matches [3]string
+		//		fmt.Println("Matching ", oName, oKind)
+		// Pod from Deployment: costar-sync-marshaller-84bfdb96c4-8bv2x
+		r, err := regexp.Compile("^([0-9a-zA-Z-]+)-([0-9a-z]+)$") //-([-0-9a-zA-Z]{5}+)$")
+		if err != nil {
+			fmt.Println("FAILED!! ", oName, oKind)
+			return "", ""
+		} else {
+			for index, match := range r.FindStringSubmatch(oName) {
+				if index > 0 {
+					return match, "Deployment"
+					//				matches[index-1] = match
+				}
+			}
+		}
+	}
+	// Pod from Statefulset: costar-sync-marshaller-1
+	// Pod from DaemonSet: costar-sync-marshaller-84bfd
+	// Pod from Job: costar-sync-marshaller-28400175-rzr8v
+
+	return "", ""
+}
+
+func findOwner(clientset *kubernetes.Clientset, ns string, oName string, oKind string) (string, string) {
+	switch oKind {
+	case "ReplicaSet":
+		replica, repErr := clientset.AppsV1().ReplicaSets(ns).Get(context.TODO(), oName, metav1.GetOptions{})
+		if repErr != nil {
+			panic(repErr.Error())
+		}
+		return replica.OwnerReferences[0].Name, "Deployment"
+	case "DaemonSet", "StatefulSet", "Job":
+		return oName, oKind
+	default:
+		//fmt.Printf("Could not find resource manager for type %s\n", pod.OwnerReferences[0].Kind)
+		//continue
+	}
+	return "", ""
 }
